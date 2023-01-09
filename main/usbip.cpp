@@ -23,13 +23,13 @@
 #define USBIP_CMD_UNLINK bswap_constant_16(0x02)
 #define USBIP_RET_UNLINK bswap_constant_32(0x04)
 
-#define USBIP_VERSION   bswap_constant_16(0x0111)   // v1.11
-#define USB_LOW_SPEED   bswap_constant_32(1)
-#define USB_FULL_SPEED  bswap_constant_32(2)
+#define USBIP_VERSION bswap_constant_16(0x0111) // v1.11
+#define USB_LOW_SPEED bswap_constant_32(1)
+#define USB_FULL_SPEED bswap_constant_32(2)
 
 static usbip_import_t import_data = {};
 static usbip_devlist_t devlist_data = {};
-static uint32_t last_seqnum = 0;
+// static uint32_t last_seqnum = 0;
 static uint32_t last_unlink = 0;
 
 usb_device_info_t info;
@@ -39,14 +39,16 @@ static SemaphoreHandle_t usb_sem;
 static SemaphoreHandle_t usb_sem1;
 static int _sock;
 
-static bool is_ready = false;
-static bool finished = false;
-static usb_transfer_t *_transfer;
+// static bool is_ready = false;
+// static bool finished = false;
+// static usb_transfer_t *_transfer;
 
-#define USB_CTRL_RESP   0x1001
-#define USB_EPx_RESP    0x1002
+static usb_transfer_t *g_xfer_read;
 
-ESP_EVENT_DECLARE_BASE( USBIP_EVENT_BASE );
+#define USB_CTRL_RESP 0x1001
+#define USB_EPx_RESP 0x1002
+
+ESP_EVENT_DECLARE_BASE(USBIP_EVENT_BASE);
 ESP_EVENT_DEFINE_BASE(USBIP_EVENT_BASE);
 
 #define TAG "usbip"
@@ -56,22 +58,23 @@ static std::vector<uint32_t> vec;
 
 static void usb_ctrl_cb(usb_transfer_t *transfer)
 {
-    esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USB_CTRL_RESP, (void*)&transfer, sizeof(usb_transfer_t*), 10);
+    esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USB_CTRL_RESP, (void *)&transfer, sizeof(usb_transfer_t *), 10);
 }
 
 static void usb_read_cb(usb_transfer_t *transfer)
 {
-    esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USB_EPx_RESP, (void*)&transfer, sizeof(usb_transfer_t*), 10);
+    esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USB_EPx_RESP, (void *)&transfer, sizeof(usb_transfer_t *), 10);
 }
 
-static void _event_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+static void _event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     switch (event_id)
     {
-    case USB_CTRL_RESP:{
-        USBipDevice* dev = (USBipDevice*)event_handler_arg;
+    case USB_CTRL_RESP:
+    {
+        USBipDevice *dev = (USBipDevice *)event_handler_arg;
         usb_transfer_t *transfer = *(usb_transfer_t **)event_data;
-        usbip_submit_t* req = (usbip_submit_t*)transfer->context;
+        usbip_submit_t *req = (usbip_submit_t *)transfer->context;
         uint32_t seqnum = __bswap_32(req->header.seqnum);
         if (std::find(vec.begin(), vec.end(), seqnum) != vec.end())
         {
@@ -80,11 +83,13 @@ static void _event_handler(void* event_handler_arg, esp_event_base_t event_base,
             break;
         }
         vec.insert(vec.begin(), seqnum);
-        if(vec.size() >= 999) vec.pop_back();
+        if (vec.size() >= 999)
+            vec.pop_back();
 
         int _len = transfer->actual_num_bytes - 8; //__bswap_32(req->length);
-        if(_len < 0) {
-            dev->deallocate(transfer);   
+        if (_len < 0)
+        {
+            dev->deallocate(transfer);
             break;
         }
         if (req->header.direction == 0) // 0: USBIP_DIR_OUT
@@ -97,44 +102,56 @@ static void _event_handler(void* event_handler_arg, esp_event_base_t event_base,
         req->header.direction = 0;
         req->header.ep = 0;
         req->status = 0;
-        // TODO: transfer_buffer. If direction is USBIP_DIR_IN then n equals actual_length; 
-        // otherwise n equals 0. 
+        // TODO: transfer_buffer. If direction is USBIP_DIR_IN then n equals actual_length;
+        // otherwise n equals 0.
         // For ISO transfers the padding between each ISO packets is not transmitted.
         req->length = __bswap_32(_len);
         req->padding = 0;
-        if(_len) memcpy(&req->transfer_buffer[0], transfer->data_buffer + 8, _len);
+        if (_len)
+            memcpy(&req->transfer_buffer[0], transfer->data_buffer + 8, _len);
         // req->transfer_buffer = transfer->data_buffer + 8;
-        if(transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        if (transfer->status != USB_TRANSFER_STATUS_COMPLETED)
+        {
             _len = 0;
             req->length = 0;
             req->status = -ETIME;
             req->error_count = 1;
         }
         int to_write = 0x30 + _len;
-        ESP_LOG_BUFFER_HEX_LEVEL("USB_CTRL_RESP", (void*)req, to_write, ESP_LOG_WARN);
-        send(_sock, (void*)req, to_write, MSG_DONTWAIT);
+        ESP_LOG_BUFFER_HEX_LEVEL("USB_CTRL_RESP", (void *)req, to_write, ESP_LOG_WARN);
+        send(_sock, (void *)req, to_write, MSG_DONTWAIT);
         delete req;
         dev->deallocate(transfer);
         break;
     }
 
-    case USB_EPx_RESP:{
-        USBipDevice* dev = (USBipDevice*)event_handler_arg;
+    case USB_EPx_RESP:
+    {
+        ESP_LOGI(TAG, "USB_EPx_RESP");
+        USBipDevice *dev = (USBipDevice *)event_handler_arg;
         usb_transfer_t *transfer = *(usb_transfer_t **)event_data;
-        usbip_submit_t* req = (usbip_submit_t*)transfer->context;
+        usbip_submit_t *req = (usbip_submit_t *)transfer->context;
         uint32_t seqnum = __bswap_32(req->header.seqnum);
         if (std::find(vec.begin(), vec.end(), seqnum) != vec.end())
         {
+            ESP_LOGI(TAG, "std::find seqnum:%d", (int)seqnum);
             delete req;
             dev->deallocate(transfer);
             break;
         }
         vec.insert(vec.begin(), seqnum);
-        if(vec.size() >= 999) vec.pop_back();
+        if (vec.size() >= 999)
+            vec.pop_back();
 
         int _len = transfer->actual_num_bytes;
-        if(_len <= 0) {
-            dev->deallocate(transfer);   
+
+        ESP_LOG_BUFFER_HEX_LEVEL("USB_EPx_RESP REQ:", (void *)req, 0x30 + _len, ESP_LOG_WARN);
+
+        ESP_LOGI(TAG, "transfer->actual_num_bytes:%d", _len);
+
+        if (_len <= 0)
+        {
+            dev->deallocate(transfer);
             break;
         }
         if (req->header.direction == 0)
@@ -147,23 +164,31 @@ static void _event_handler(void* event_handler_arg, esp_event_base_t event_base,
         req->header.direction = 0;
         req->header.ep = 0;
         req->status = 0;
-        // TODO: transfer_buffer. If direction is USBIP_DIR_IN then n equals actual_length; 
-        // otherwise n equals 0. 
+        // TODO: transfer_buffer. If direction is USBIP_DIR_IN then n equals actual_length;
+        // otherwise n equals 0.
         // For ISO transfers the padding between each ISO packets is not transmitted.
         req->length = __bswap_32(_len);
         req->start_frame = 0;
         req->padding = 0;
         memcpy(&req->transfer_buffer[0], transfer->data_buffer, transfer->actual_num_bytes);
-        if(transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        ESP_LOG_BUFFER_HEX_LEVEL("req->transfer_buffer", req->transfer_buffer, transfer->actual_num_bytes, ESP_LOG_WARN);
+
+        ESP_LOGI(TAG, "transfer->status:%d", (int)(transfer->status));
+        if (transfer->status != USB_TRANSFER_STATUS_COMPLETED)
+        {
+            ESP_LOGI(TAG, "!= USB_TRANSFER_STATUS_COMPLETED");
             _len = 0;
             req->length = 0;
             req->status = -ETIME;
             req->error_count = 1;
         }
         int to_write = 0x30 + _len;
-        ESP_LOG_BUFFER_HEX_LEVEL("USB_EPx_RESP", (void*)req, to_write, ESP_LOG_WARN);
+        // int to_write = 0x30 + transfer->actual_num_bytes;
 
-        send(_sock, (void*)req, to_write, MSG_DONTWAIT);
+        ESP_LOGI(TAG, "to_write:%d", to_write);
+        ESP_LOG_BUFFER_HEX_LEVEL("USB_EPx_RESP", (void *)req, to_write, ESP_LOG_WARN);
+
+        send(_sock, (void *)req, to_write, MSG_DONTWAIT);
         delete req;
         dev->deallocate(transfer);
         break;
@@ -174,67 +199,76 @@ static void _event_handler(void* event_handler_arg, esp_event_base_t event_base,
     }
 }
 
-static void _event_handler1(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+static void _event_handler1(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     switch (event_id)
     {
-    case USBIP_CMD_SUBMIT:{
-        USBipDevice* dev = (USBipDevice*)event_handler_arg;
-        urb_data_t* data = (urb_data_t*)event_data;
-        int socket = data->socket;
-        uint8_t* rx_buffer = (uint8_t*) data->rx_buffer;
+    case USBIP_CMD_SUBMIT:
+    {
+        USBipDevice *dev = (USBipDevice *)event_handler_arg;
+        urb_data_t *data = (urb_data_t *)event_data;
+        // int socket = data->socket;
+        uint8_t *rx_buffer = (uint8_t *)data->rx_buffer;
         int len = data->len;
         int start = 0;
         int _len = len;
-        usbip_submit_t* __req = (usbip_submit_t*)(rx_buffer);
-        uint32_t seqnum = __bswap_32(__req->header.seqnum);
+        // usbip_submit_t *__req = (usbip_submit_t *)(rx_buffer);
+        // uint32_t seqnum = __bswap_32(__req->header.seqnum);
 
         do
         {
             ESP_LOGW(TAG, "USBIP_CMD_SUBMIT: start 0x%02x, len: %d", start, _len);
             ESP_LOG_BUFFER_HEX("SUBMIT", rx_buffer + start, 48);
 
-            usbip_submit_t* _req = (usbip_submit_t*)(rx_buffer + start);
-            usbip_submit_t* req = new usbip_submit_t();
+            usbip_submit_t *_req = (usbip_submit_t *)(rx_buffer + start);
+            usbip_submit_t *req = new usbip_submit_t();
             int tl = 0;
-            if(_req->header.direction == 0) tl = __bswap_32(_req->length);
+            ESP_LOGI(TAG, "_req->header.direction:%d", (int)(_req->header.direction));
+            if (_req->header.direction == 0)
+                tl = __bswap_32(_req->length);
+            ESP_LOGI(TAG, "tl:%d", tl);
 
             memcpy(req, _req, 0x30 + tl);
-            
-            ESP_LOGW(TAG, "request ep: %d", __bswap_32(req->header.ep));
+
+            ESP_LOGI(TAG, "request ep: %d", (int)(req->header.ep));
             int tlen = 0;
 
-            if(req->header.ep == 0) // EP0
+            if (req->header.ep == 0) // EP0
             {
                 tlen = dev->req_ctrl_xfer(req);
-                if(tlen > 0){
+                if (tlen > 0)
+                {
                     ESP_LOG_BUFFER_HEX_LEVEL("SUBMIT 7", rx_buffer + start, 48 + tlen, ESP_LOG_ERROR);
                 }
                 tlen = 0;
-            } else { // EPx
+            }
+            else
+            { // EPx
                 tlen = dev->req_ep_xfer(req);
-                if(tlen > 0){
+                ESP_LOGI("SUBMIT 10 tlen:", "%d", tlen);
+                if (tlen > 0)
+                {
                     ESP_LOG_BUFFER_HEX_LEVEL("SUBMIT 10", rx_buffer + start, 48 + tlen, ESP_LOG_ERROR);
                 }
             }
             start += 0x30 + tlen;
             _len -= 0x30 + tlen;
             ESP_LOGI(TAG, "USBIP_CMD_SUBMIT: end 0x%02x, len: %d", start, _len);
-        } 
-        while (_len >= 0x30);
+        } while (_len >= 0x30);
         break;
     }
 
-    case USBIP_CMD_UNLINK:{
-        usbip_unlink_t* req = *(usbip_unlink_t**)event_data;
+    case USBIP_CMD_UNLINK:
+    {
+        usbip_unlink_t *req = *(usbip_unlink_t **)event_data;
         req->header.command = USBIP_RET_UNLINK;
         req->header.devid = 0;
         req->header.direction = 0;
         req->header.ep = 0;
         req->status = 0;
         int to_write = 48;
-        send(_sock, (void*)req, to_write, MSG_DONTWAIT);
-        ESP_LOG_BUFFER_HEX(TAG, (void*)req, 48);
+        send(_sock, (void *)req, to_write, MSG_DONTWAIT);
+        ESP_LOG_BUFFER_HEX(TAG, (void *)req, 48);
         delete req;
         break;
     }
@@ -244,32 +278,114 @@ static void _event_handler1(void* event_handler_arg, esp_event_base_t event_base
     }
 }
 
-static void _event_handler2(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+static bool is_transfer_completed(usb_transfer_t *transfer)
 {
-    switch(event_id)
-    {
-        case OP_REQ_DEVLIST:{
-            int to_write = 0;
-            // 0xC + i*0x138 + m_(i-1)*4
-            if(devlist_data.request.version == 0) /*!< assume there is no device connected yet */
-            {
-                to_write = 12;
-                devlist_data.request.version = USBIP_VERSION;
-                devlist_data.request.command = OP_REP_DEVLIST;
-                devlist_data.request.status = 0;
-                devlist_data.count = 0;
-            } else {
-                to_write = 0x0c + __bswap_32(devlist_data.count) * 0x138 + devlist_data.bNumInterfaces * 4;
-            }
-            send(_sock, (void*)&devlist_data, to_write, MSG_DONTWAIT);
-            break;
-        }
+    bool completed = false;
 
-        case OP_REQ_IMPORT:{
-            int to_write = sizeof(usbip_import_t);
-            send(_sock, (void*)&import_data, to_write, MSG_DONTWAIT);
-            break;
+    switch (transfer->status)
+    {
+    case USB_TRANSFER_STATUS_COMPLETED:
+        completed = true;
+        break;
+    case USB_TRANSFER_STATUS_NO_DEVICE: // User is notified about device disconnection from usb_event_cb
+    case USB_TRANSFER_STATUS_CANCELED:
+        break;
+    case USB_TRANSFER_STATUS_ERROR:
+    case USB_TRANSFER_STATUS_TIMED_OUT:
+    case USB_TRANSFER_STATUS_STALL:
+    case USB_TRANSFER_STATUS_OVERFLOW:
+    case USB_TRANSFER_STATUS_SKIPPED:
+    default:
+        break;
+    }
+    return completed;
+}
+
+static void re_send_data(usb_transfer_t *transfer)
+{
+    int _len = transfer->actual_num_bytes;
+
+    if (_len <= 0)
+    {
+        return;
+    }
+
+    usbip_submit_t *req = new usbip_submit_t();
+
+    req->header.command = USBIP_RET_SUBMIT;
+    req->header.devid = 0;
+    req->header.direction = 0;
+    req->header.ep = 0;
+    req->status = 0;
+    // TODO: transfer_buffer. If direction is USBIP_DIR_IN then n equals actual_length;
+    // otherwise n equals 0.
+    // For ISO transfers the padding between each ISO packets is not transmitted.
+    req->length = __bswap_32(_len);
+    req->start_frame = 0;
+    req->padding = 0;
+    memcpy(&req->transfer_buffer[0], transfer->data_buffer, transfer->actual_num_bytes);
+
+    int to_write = 0x30 + _len;
+
+    send(_sock, (void *)req, to_write, MSG_DONTWAIT);
+    //delete req;
+}
+
+static void handle_rx(usb_transfer_t *transfer, uint8_t *data, size_t data_len, void *arg)
+{
+    if (data_len > 2)
+    {
+        //re_send_data(transfer);
+        uint8_t tarData[data_len - 2 + 1];
+        tarData[data_len - 2] = '\0';
+        memcpy(tarData, data + 2, data_len - 2);
+        ESP_LOGI(TAG, "len:%d %s", data_len - 2, tarData);
+    }
+}
+
+static void data_read(usb_transfer_t *transfer)
+{
+    if (is_transfer_completed(transfer))
+    {
+        //re_send_data(transfer);
+
+        handle_rx(transfer, transfer->data_buffer, transfer->actual_num_bytes, NULL);
+
+        usb_host_transfer_submit(g_xfer_read);
+    }
+}
+
+static void _event_handler2(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    switch (event_id)
+    {
+    case OP_REQ_DEVLIST:
+    {
+        int to_write = 0;
+        // 0xC + i*0x138 + m_(i-1)*4
+        if (devlist_data.request.version == 0) /*!< assume there is no device connected yet */
+        {
+            to_write = 12;
+            devlist_data.request.version = USBIP_VERSION;
+            devlist_data.request.command = OP_REP_DEVLIST;
+            devlist_data.request.status = 0;
+            devlist_data.count = 0;
         }
+        else
+        {
+            to_write = 0x0c + __bswap_32(devlist_data.count) * 0x138 + devlist_data.bNumInterfaces * 4;
+        }
+        send(_sock, (void *)&devlist_data, to_write, MSG_DONTWAIT);
+        break;
+    }
+
+    case OP_REQ_IMPORT:
+    {
+        int to_write = sizeof(usbip_import_t);
+        send(_sock, (void *)&import_data, to_write, MSG_DONTWAIT);
+
+        break;
+    }
     }
 }
 
@@ -294,16 +410,16 @@ USBipDevice::~USBipDevice()
     memset(&devlist_data, 0, sizeof(usbip_devlist_t));
 }
 
-bool USBipDevice::init(USBhost* host)
+bool USBipDevice::init(USBhost *host)
 {
     _host = host;
 
-    usb_device_info_t info = host->getDeviceInfo();
+    // usb_device_info_t info = host->getDeviceInfo();
     USBhostDevice::init(1032);
     xfer_ctrl->callback = usb_ctrl_cb;
 
     config_desc = host->getConfigurationDescriptor();
-    
+
     int offset = 0;
     for (size_t n = 0; n < config_desc->bNumInterfaces; n++)
     {
@@ -318,7 +434,9 @@ bool USBipDevice::init(USBhost* host)
             if (adr & 0x80)
             {
                 endpoints[adr & 0xf][1] = ep;
-            } else {
+            }
+            else
+            {
                 endpoints[adr & 0xf][0] = ep;
             }
 
@@ -327,9 +445,30 @@ bool USBipDevice::init(USBhost* host)
                 printf("address: 0x%02x, EP max size: %d, dir: %s\n", ep->bEndpointAddress, ep->wMaxPacketSize, (ep->bEndpointAddress & 0x80) ? "IN" : "OUT");
             else
                 ESP_LOGW("", "error to parse endpoint by index; EP num: %d/%d, len: %d", i + 1, intf->bNumEndpoints, config_desc->wTotalLength);
+
+            //---------------------------------------------------------------------------------------------
+            if (ep->bEndpointAddress & 0x80)
+            {
+                esp_err_t err = usb_host_interface_claim(_host->clientHandle(), _host->deviceHandle(), n, 0);
+                ESP_LOGI("usb_host_interface_claim", "interface number: %d", n);
+
+                
+                usb_host_transfer_alloc(64, 0, &g_xfer_read);
+                if (g_xfer_read == NULL)
+                    return false;
+                g_xfer_read->callback = &data_read;
+                g_xfer_read->num_bytes = 64;
+                g_xfer_read->bEndpointAddress = ep->bEndpointAddress;
+                g_xfer_read->device_handle = _host->deviceHandle();
+                ESP_LOGI("usb_host_interface_claim", "g_xfer_read->bEndpointAddress: %d", (int)(ep->bEndpointAddress));
+                usb_host_transfer_submit(g_xfer_read);
+                
+            }
+            //---------------------------------------------------------------------------------------------
         }
-        esp_err_t err = usb_host_interface_claim(_host->clientHandle(), _host->deviceHandle(), n, 0);
-        ESP_LOGI("", "interface claim status: %d", err);
+
+        // esp_err_t err = usb_host_interface_claim(_host->clientHandle(), _host->deviceHandle(), n, 0);
+        // ESP_LOGI("", "interface claim status: %d", err);
     }
 
     fill_list_data();
@@ -369,7 +508,7 @@ void USBipDevice::fill_list_data()
         devlist_data.intfs[n].bInterfaceClass = intf->bInterfaceClass,
         devlist_data.intfs[n].bInterfaceSubClass = intf->bInterfaceSubClass,
         devlist_data.intfs[n].bInterfaceProtocol = intf->bInterfaceProtocol,
-        devlist_data.intfs[n].padding  = 0;
+        devlist_data.intfs[n].padding = 0;
     }
 
     devlist_data.request.version = USBIP_VERSION;
@@ -393,38 +532,38 @@ void USBipDevice::fill_list_data()
     devlist_data.bNumInterfaces = config_desc->bNumInterfaces;
 }
 
-int USBipDevice::req_ctrl_xfer(usbip_submit_t* req)
+int USBipDevice::req_ctrl_xfer(usbip_submit_t *req)
 {
-    usb_transfer_t* _xfer_ctrl = allocate(1000);
+    usb_transfer_t *_xfer_ctrl = allocate(1000);
     _xfer_ctrl->callback = usb_ctrl_cb;
     _xfer_ctrl->context = req;
     _xfer_ctrl->bEndpointAddress = __bswap_32(req->header.ep) | (__bswap_32(req->header.direction) << 7);
 
-    usb_setup_packet_t * temp = (usb_setup_packet_t *)_xfer_ctrl->data_buffer;
+    usb_setup_packet_t *temp = (usb_setup_packet_t *)_xfer_ctrl->data_buffer;
     size_t n = 0;
     if (req->header.direction == 0) // 0: USBIP_DIR_OUT
     {
         n = __bswap_32(req->length);
-        memcpy(_xfer_ctrl->data_buffer, (void*)&req->transfer_buffer, n);
+        memcpy(_xfer_ctrl->data_buffer, (void *)&req->transfer_buffer, n);
     }
-    int _n = __bswap_32(req->length);
-    memcpy(temp->val, (uint8_t*)&req->setup, 8 + n);
-    // TODO: transfer_buffer. If direction is USBIP_DIR_OUT then n equals transfer_buffer_length; 
-    // otherwise n equals 0. 
+    // int _n = __bswap_32(req->length);
+    memcpy(temp->val, (uint8_t *)&req->setup, 8 + n);
+    // TODO: transfer_buffer. If direction is USBIP_DIR_OUT then n equals transfer_buffer_length;
+    // otherwise n equals 0.
     // For ISO transfers the padding between each ISO packets is not transmitted.
     _xfer_ctrl->num_bytes = sizeof(usb_setup_packet_t) + __bswap_32(req->length);
     _xfer_ctrl->bEndpointAddress = __bswap_32(req->header.ep) | (__bswap_32(req->header.direction) << 7);
     _xfer_ctrl->context = req;
-    
-    esp_err_t err = usb_host_transfer_submit_control(_host->clientHandle(), _xfer_ctrl);
 
-    return  n;
+    usb_host_transfer_submit_control(_host->clientHandle(), _xfer_ctrl);
+
+    return n;
 }
 
-int USBipDevice::req_ep_xfer(usbip_submit_t* req)
+int USBipDevice::req_ep_xfer(usbip_submit_t *req)
 {
     size_t _len = __bswap_32(req->length);
-    // ESP_LOG_BUFFER_HEX_LEVEL("xfer ep", req, 48, ESP_LOG_ERROR);
+    ESP_LOGI(TAG, "req->length:%d", (int)(_len));
 
     uint16_t mps = 64;
 
@@ -435,13 +574,14 @@ int USBipDevice::req_ep_xfer(usbip_submit_t* req)
         if (ep)
         {
             mps = ep->wMaxPacketSize;
-        } else {
+        }
+        else
+        {
             ESP_LOGE("", "missing EP%d\n", adr);
             return 0;
         }
 
         _len = usb_round_up_to_mps(_len, mps);
-        // ESP_LOGE("", "mps: %d[%d]\n", mps, _len);
     }
     else
     {
@@ -449,73 +589,78 @@ int USBipDevice::req_ep_xfer(usbip_submit_t* req)
     }
 
     usb_transfer_t *xfer_read = allocate(_len);
-    if(xfer_read == NULL) return 0;
+    if (xfer_read == NULL)
+        return 0;
     xfer_read->callback = &usb_read_cb;
-    xfer_read->context = req;
-    xfer_read->bEndpointAddress = __bswap_32(req->header.ep);
-    // printf("req_ep_xfer ep: %d[%d], dir: %d\n", __bswap_32(req->header.ep), xfer_read->bEndpointAddress, __bswap_32(req->header.direction));
+    //xfer_read->context = req;
+    //xfer_read->bEndpointAddress = __bswap_32(req->header.ep);
     ESP_LOG_BUFFER_HEX_LEVEL("", req, 48, ESP_LOG_WARN);
 
     int n = 0;
     if (req->header.direction == 0)
     {
-        memcpy(xfer_read->data_buffer, (void*)&req->transfer_buffer, _len);
+        memcpy(xfer_read->data_buffer, (void *)&req->transfer_buffer, _len);
+        ESP_LOG_BUFFER_HEX_LEVEL("xfer_read->data_buffer:", xfer_read->data_buffer, _len, ESP_LOG_WARN);
         n = _len;
     }
-    int _n = _len;
+    // int _n = _len;
 
-    // TODO: transfer_buffer. If direction is USBIP_DIR_OUT then n equals transfer_buffer_length; 
-    // otherwise n equals 0. 
+    // TODO: transfer_buffer. If direction is USBIP_DIR_OUT then n equals transfer_buffer_length;
+    // otherwise n equals 0.
     // For ISO transfers the padding between each ISO packets is not transmitted.
     xfer_read->num_bytes = _len;
     // if(xfer_read->num_bytes == 0x100 && req->header.direction != 0) xfer_read->num_bytes = 0xff;
     xfer_read->bEndpointAddress = __bswap_32(req->header.ep) | (__bswap_32(req->header.direction) << 7);
+    ESP_LOGI("usb_host_interface_claim", "xfer_read->bEndpointAddress: %d", (int)(xfer_read->bEndpointAddress));
     // ESP_LOG_BUFFER_HEX("", temp->val, len - 40);
     // printf("num_bytes_epx[%d/%d]: %d\n", n, _n, xfer_read->num_bytes);
     xfer_read->context = req;
 
-    esp_err_t err = usb_host_transfer_submit(xfer_read);
+    usb_host_transfer_submit(xfer_read);
 
     return n;
 }
 
 // TODO: switch it to events
-extern "C" void parse_request(const int sock, uint8_t* rx_buffer, size_t len)
+extern "C" void parse_request(const int sock, uint8_t *rx_buffer, size_t len)
 {
-    uint32_t cmd = ((usbip_request_t*)rx_buffer)->command;
+    uint32_t cmd = ((usbip_request_t *)rx_buffer)->command;
     _sock = sock;
 
     switch (cmd)
     {
-    case OP_REQ_DEVLIST:{
+    case OP_REQ_DEVLIST:
+    {
         ESP_LOGI(TAG, "OP_REQ_DEVLIST");
         esp_event_post_to(loop_handle, USBIP_EVENT_BASE, OP_REQ_DEVLIST, NULL, 0, 10);
         break;
     }
-    case OP_REQ_IMPORT:{
+    case OP_REQ_IMPORT:
+    {
         ESP_LOGI(TAG, "OP_REQ_IMPORT");
         esp_event_post_to(loop_handle, USBIP_EVENT_BASE, OP_REQ_IMPORT, NULL, 0, 10);
         break;
     }
-    case USBIP_CMD_SUBMIT:{
+    case USBIP_CMD_SUBMIT:
+    {
         ESP_LOGI(TAG, "USBIP_CMD_SUBMIT");
         urb_data_t data = {
-             .socket = sock,
-             .len = (int)len,
-             .rx_buffer = rx_buffer
-        };
-        usbip_submit_t* _req = (usbip_submit_t*)(rx_buffer);
+            .socket = sock,
+            .len = (int)len,
+            .rx_buffer = rx_buffer};
+        // usbip_submit_t *_req = (usbip_submit_t *)(rx_buffer);
         esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USBIP_CMD_SUBMIT, &data, len + sizeof(int), 10);
         break;
     }
-    case USBIP_CMD_UNLINK:{
+    case USBIP_CMD_UNLINK:
+    {
         ESP_LOGI(TAG, "USBIP_CMD_UNLINK");
-        usbip_submit_t* _req = (usbip_submit_t*)(rx_buffer);
-        usbip_submit_t* req = new usbip_submit_t(); // make it heap caps malloc
+        usbip_submit_t *_req = (usbip_submit_t *)(rx_buffer);
+        usbip_submit_t *req = new usbip_submit_t(); // make it heap caps malloc
         last_unlink = __bswap_32(_req->flags);
         vec.insert(vec.begin(), last_unlink);
         memcpy(req, _req, 0x30);
-        esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USBIP_CMD_UNLINK, &req, sizeof(usbip_submit_t*), 10);
+        esp_event_post_to(loop_handle, USBIP_EVENT_BASE, USBIP_CMD_UNLINK, &req, sizeof(usbip_submit_t *), 10);
         break;
     }
     default:
@@ -524,16 +669,14 @@ extern "C" void parse_request(const int sock, uint8_t* rx_buffer, size_t len)
     }
 }
 
-
 USBIP::USBIP()
 {
     esp_event_loop_args_t loop_args = {
         .queue_size = 100,
         .task_name = "usbip_events",
         .task_priority = 21,
-        .task_stack_size = 4*1024,
-        .task_core_id = 0
-    };
+        .task_stack_size = 4 * 1024,
+        .task_core_id = 0};
 
     esp_event_loop_create(&loop_args, &loop_handle);
 

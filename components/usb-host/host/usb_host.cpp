@@ -19,10 +19,13 @@ void _client_event_callback(const usb_host_client_event_msg_t *event_msg, void *
         if (host->_client_event_cb)
         {
             host->_client_event_cb(event_msg, arg);
-        } else {
-            
         }
-    } else {
+        else
+        {
+        }
+    }
+    else
+    {
         ESP_LOGI("USB_HOST_CLIENT_EVENT_DEV_GONE", "client event: %d", event_msg->event);
         if (host->_client_event_cb)
         {
@@ -34,21 +37,24 @@ void _client_event_callback(const usb_host_client_event_msg_t *event_msg, void *
 
 static void client_async_seq_task(void *param)
 {
-    USBhost* host = (USBhost *)param;
+    USBhost *host = (USBhost *)param;
     printf("create async task\n");
     while (1)
     {
         usb_host_client_handle_t client_hdl = host->client_hdl;
         uint32_t event_flags;
-        if(client_hdl)usb_host_client_handle_events(client_hdl, 1);
+        if (client_hdl)
+            usb_host_client_handle_events(client_hdl, 1);
         if (ESP_OK == usb_host_lib_handle_events(1, &event_flags))
         {
             if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS)
             {
                 ESP_LOGD("", "No more clients\n");
-                do{
-                    if(usb_host_device_free_all() != ESP_ERR_NOT_FINISHED) break;
-                }while(1);
+                do
+                {
+                    if (usb_host_device_free_all() != ESP_ERR_NOT_FINISHED)
+                        break;
+                } while (1);
                 usb_host_uninstall();
                 host->init(false);
             }
@@ -85,8 +91,7 @@ bool USBhost::init(bool create_tasks)
         .async = {
             .client_event_callback = _client_event_callback,
             .callback_arg = this,
-        }
-    };
+        }};
 
     err = usb_host_client_register(&client_config, &client_hdl);
     ESP_LOGI("", "client register status: %d", err);
@@ -128,7 +133,7 @@ usb_device_info_t USBhost::getDeviceInfo()
     return dev_info;
 }
 
-const usb_device_desc_t* USBhost::getDeviceDescriptor()
+const usb_device_desc_t *USBhost::getDeviceDescriptor()
 {
     const usb_device_desc_t *device_desc;
     usb_host_get_device_descriptor(dev_hdl, &device_desc);
@@ -136,7 +141,7 @@ const usb_device_desc_t* USBhost::getDeviceDescriptor()
     return device_desc;
 }
 
-const usb_config_desc_t* USBhost::getConfigurationDescriptor()
+const usb_config_desc_t *USBhost::getConfigurationDescriptor()
 {
     const usb_config_desc_t *config_desc;
     usb_host_get_active_config_descriptor(dev_hdl, &config_desc);
